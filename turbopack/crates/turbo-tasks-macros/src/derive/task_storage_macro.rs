@@ -1310,8 +1310,8 @@ fn generate_task_storage_accessors_trait(
         trait_methods.extend(generate_flag_trait_accessor_methods(field));
     }
 
-    // Generate CachedDataItem adapter methods
-    let adapter_methods = generate_cached_data_adapter_trait_methods(grouped_fields);
+    // Generate CachedDataItem adapter methods (impl block, not part of the trait)
+    let adapter_impl = generate_cached_data_adapter_impl(grouped_fields);
 
     quote! {
         /// Trait for typed storage accessors.
@@ -1364,9 +1364,9 @@ fn generate_task_storage_accessors_trait(
             }
 
             #trait_methods
-
-            #adapter_methods
         }
+
+        #adapter_impl
     }
 }
 
@@ -3233,14 +3233,12 @@ fn generate_shrink_to_fit_method(grouped_fields: &GroupedFields) -> proc_macro2:
 // CachedDataItem Adapter Code Generation
 // =============================================================================
 
-/// Generate the CachedDataItem adapter methods for the TaskStorageAccessors trait.
+/// Generate the CachedDataItemAdapter impl block for TaskStorageAccessors.
 ///
-/// These methods provide the CachedDataItem API (add, insert, get, remove, etc.)
-/// using the typed accessor methods from the trait. This enables proper access
-/// tracking via check_access() and track_modification().
-fn generate_cached_data_adapter_trait_methods(
-    grouped_fields: &GroupedFields,
-) -> proc_macro2::TokenStream {
+/// This generates a blanket impl that provides the CachedDataItem API methods
+/// for any type implementing TaskStorageAccessors. The simpler wrapper methods
+/// are provided by CachedDataItemAdapterExt in storage_schema.rs.
+fn generate_cached_data_adapter_impl(grouped_fields: &GroupedFields) -> proc_macro2::TokenStream {
     // Only generate if there are fields with variants
     if !grouped_fields.has_fields_with_variant() {
         return quote! {};
@@ -3254,194 +3252,86 @@ fn generate_cached_data_adapter_trait_methods(
     let iter_arms = generate_iter_arms(grouped_fields);
     let count_arms = generate_count_arms(grouped_fields);
 
+    // Generate a blanket impl of CachedDataItemAdapter for all TaskStorageAccessors.
+    // The simpler wrapper methods (add, insert, contains_key, update, get_mut_or_insert_with,
+    // extend, extract_if) are provided by CachedDataItemAdapterExt in storage_schema.rs.
     quote! {
         // =========================================================================
-        // CachedDataItem Adapter Methods
+        // CachedDataItemAdapter Implementation
         //
-        // These methods provide backward compatibility with the CachedDataItem API
-        // while using typed accessors internally for proper access tracking.
+        // Blanket impl for all TaskStorageAccessors. These methods contain the
+        // generated match arms that dispatch to typed accessors.
+        // Simpler wrapper methods are in CachedDataItemAdapterExt.
         // =========================================================================
 
-        /// Add a CachedDataItem to storage.
-        ///
-        /// Returns `true` if the item was newly added, `false` if it already existed.
-        /// Does NOT overwrite if the key already exists.
-        fn add(&mut self, item: crate::data::CachedDataItem) -> bool {
-            use turbo_tasks::KeyValuePair;
-            let (key, value) = item.into_key_and_value();
-            // Check first - add should not overwrite existing values
-            if self.contains_key(&key) {
-                return false;
-            }
-            self.insert_kv(key, value);
-            true
-        }
+        impl<T: TaskStorageAccessors> crate::backend::storage_schema::CachedDataItemAdapter for T {
+            fn insert_kv(
+                &mut self,
+                key: crate::data::CachedDataItemKey,
+                value: crate::data::CachedDataItemValue,
+            ) -> Option<crate::data::CachedDataItemValue> {
+                use crate::data::{CachedDataItemKey, CachedDataItemValue};
+                match (key, value) {
+                    #insert_kv_arms
 
-        /// Insert a CachedDataItem, returning the old value if present.
-        fn insert(
-            &mut self,
-            item: crate::data::CachedDataItem,
-        ) -> Option<crate::data::CachedDataItemValue> {
-            use turbo_tasks::KeyValuePair;
-            let (key, value) = item.into_key_and_value();
-            self.insert_kv(key, value)
-        }
-
-        /// Insert a key-value pair, returning the old value if present.
-        fn insert_kv(
-            &mut self,
-            key: crate::data::CachedDataItemKey,
-            value: crate::data::CachedDataItemValue,
-        ) -> Option<crate::data::CachedDataItemValue> {
-            use crate::data::{CachedDataItemKey, CachedDataItemValue};
-            match (key, value) {
-                #insert_kv_arms
-
-                // Catch-all for mismatched key/value types
-                #[allow(unreachable_patterns)]
-                (key, value) => {
-                    panic!(
-                        "Mismatched CachedDataItem key/value types: key={key:?}, value={value:?}"
-                    );
-                }
-            }
-        }
-
-        /// Check if a key exists in storage.
-        fn contains_key(&self, key: &crate::data::CachedDataItemKey) -> bool {
-            self.get(key).is_some()
-        }
-
-        /// Get a reference to a CachedDataItem value by key.
-        fn get(
-            &self,
-            key: &crate::data::CachedDataItemKey,
-        ) -> Option<crate::data::CachedDataItemValueRef<'_>> {
-            use crate::data::{CachedDataItemKey, CachedDataItemValueRef};
-            match key {
-                #get_arms
-            }
-        }
-
-        /// Remove a CachedDataItem by key, returning the value if present.
-        fn remove(
-            &mut self,
-            key: &crate::data::CachedDataItemKey,
-        ) -> Option<crate::data::CachedDataItemValue> {
-            use crate::data::{CachedDataItemKey, CachedDataItemValue};
-            match key {
-                #remove_arms
-            }
-        }
-
-        /// Get a mutable reference to a CachedDataItem value by key.
-        fn get_mut(
-            &mut self,
-            key: &crate::data::CachedDataItemKey,
-        ) -> Option<crate::data::CachedDataItemValueRefMut<'_>> {
-            use crate::data::{CachedDataItemKey, CachedDataItemValueRefMut};
-            match key {
-                #get_mut_arms
-            }
-        }
-
-        /// Update a value in-place, creating it if it doesn't exist.
-        fn update(
-            &mut self,
-            key: crate::data::CachedDataItemKey,
-            update: impl FnOnce(Option<crate::data::CachedDataItemValue>) -> Option<crate::data::CachedDataItemValue>,
-        ) {
-            use turbo_tasks::KeyValuePair;
-            let old_value = self.remove(&key);
-            if let Some(new_value) = update(old_value) {
-                let item = crate::data::CachedDataItem::from_key_and_value(key, new_value);
-                self.add(item);
-            }
-        }
-
-        /// Get a mutable reference or insert a value created by the given closure.
-        fn get_mut_or_insert_with(
-            &mut self,
-            key: crate::data::CachedDataItemKey,
-            insert: impl FnOnce() -> crate::data::CachedDataItemValue,
-        ) -> crate::data::CachedDataItemValueRefMut<'_> {
-            use turbo_tasks::KeyValuePair;
-            if self.get(&key).is_none() {
-                let value = insert();
-                self.insert_kv(key.clone(), value);
-            }
-            self.get_mut(&key).expect("just inserted")
-        }
-
-        /// Count items of a specific type.
-        fn count(&self, ty: crate::data::CachedDataItemType) -> usize {
-            use crate::data::CachedDataItemType;
-            match ty {
-                #count_arms
-            }
-        }
-
-        /// Iterate over items of a specific type.
-        fn iter(
-            &self,
-            ty: crate::data::CachedDataItemType,
-        ) -> Box<dyn Iterator<Item = (crate::data::CachedDataItemKey, crate::data::CachedDataItemValueRef<'_>)> + '_> {
-            use crate::data::{CachedDataItemKey, CachedDataItemType, CachedDataItemValueRef};
-
-            match ty {
-                #iter_arms
-            }
-        }
-
-        /// Extend storage with items from an iterator.
-        /// Returns `true` if all items were newly added, `false` if any already existed.
-        fn extend(
-            &mut self,
-            _ty: crate::data::CachedDataItemType,
-            items: impl IntoIterator<Item = crate::data::CachedDataItem>,
-        ) -> bool {
-            let mut all_new = true;
-            for item in items {
-                if !self.add(item) {
-                    all_new = false;
-                }
-            }
-            all_new
-        }
-
-        /// Remove items matching a predicate.
-        fn extract_if<'a, F>(
-            &'a mut self,
-            ty: crate::data::CachedDataItemType,
-            mut predicate: F,
-        ) -> Vec<crate::data::CachedDataItem>
-        where
-            F: for<'b> FnMut(crate::data::CachedDataItemKey, crate::data::CachedDataItemValueRef<'b>) -> bool + 'a,
-        {
-            use turbo_tasks::KeyValuePair;
-            // Collect keys to remove (can't mutate while iterating)
-            let keys_to_remove: Vec<_> = self
-                .iter(ty)
-                .filter_map(|(key, value_ref)| {
-                    if predicate(key.clone(), value_ref) {
-                        Some(key)
-                    } else {
-                        None
+                    // Catch-all for mismatched key/value types
+                    #[allow(unreachable_patterns)]
+                    (key, value) => {
+                        panic!(
+                            "Mismatched CachedDataItem key/value types: key={key:?}, value={value:?}"
+                        );
                     }
-                })
-                .collect();
+                }
+            }
 
-            // Remove and collect matching items
-            keys_to_remove
-                .into_iter()
-                .filter_map(|key| {
-                    self.remove(&key).map(|value| {
-                        crate::data::CachedDataItem::from_key_and_value(key, value)
-                    })
-                })
-                .collect()
+            fn get(
+                &self,
+                key: &crate::data::CachedDataItemKey,
+            ) -> Option<crate::data::CachedDataItemValueRef<'_>> {
+                use crate::data::{CachedDataItemKey, CachedDataItemValueRef};
+                match key {
+                    #get_arms
+                }
+            }
+
+            fn remove(
+                &mut self,
+                key: &crate::data::CachedDataItemKey,
+            ) -> Option<crate::data::CachedDataItemValue> {
+                use crate::data::{CachedDataItemKey, CachedDataItemValue};
+                match key {
+                    #remove_arms
+                }
+            }
+
+            fn get_mut(
+                &mut self,
+                key: &crate::data::CachedDataItemKey,
+            ) -> Option<crate::data::CachedDataItemValueRefMut<'_>> {
+                use crate::data::{CachedDataItemKey, CachedDataItemValueRefMut};
+                match key {
+                    #get_mut_arms
+                }
+            }
+
+            fn count(&self, ty: crate::data::CachedDataItemType) -> usize {
+                use crate::data::CachedDataItemType;
+                match ty {
+                    #count_arms
+                }
+            }
+
+            fn iter(
+                &self,
+                ty: crate::data::CachedDataItemType,
+            ) -> Box<dyn Iterator<Item = (crate::data::CachedDataItemKey, crate::data::CachedDataItemValueRef<'_>)> + '_> {
+                use crate::data::{CachedDataItemKey, CachedDataItemType, CachedDataItemValueRef};
+
+                match ty {
+                    #iter_arms
+                }
+            }
         }
-
     }
 }
 

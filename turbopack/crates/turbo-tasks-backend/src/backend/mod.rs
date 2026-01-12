@@ -55,7 +55,7 @@ use crate::{
             Storage, TaskStorageSnapshot, count, get, get_many, get_mut, get_mut_or_insert_with,
             iter_many, remove,
         },
-        storage_schema::{TaskStorage, TaskStorageAccessors},
+        storage_schema::{CachedDataItemAdapterExt, TaskStorage},
     },
     backing_storage::BackingStorage,
     data::{

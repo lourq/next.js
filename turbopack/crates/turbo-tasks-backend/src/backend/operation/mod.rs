@@ -22,7 +22,9 @@ use crate::{
     backend::{
         OperationGuard, TaskDataCategory, TransientTask, TurboTasksBackend, TurboTasksBackendInner,
         storage::{SpecificTaskDataCategory, StorageWriteGuard, get, iter_many, remove},
-        storage_schema::{TaskStorage, TaskStorageAccessors},
+        storage_schema::{
+            CachedDataItemAdapter, CachedDataItemAdapterExt, TaskStorage, TaskStorageAccessors,
+        },
     },
     backing_storage::{BackingStorage, BackingStorageSealed},
     data::{
