@@ -22,7 +22,7 @@ use tracing::{Instrument, instrument};
 
 use crate::{
     Completion, InvalidationReason, InvalidationReasonSet, OutputContent, ReadCellOptions,
-    ReadOutputOptions, ResolvedVc, SharedReference, TaskId, TraitMethod, ValueTypeId, Vc, VcRead,
+    ReadOutputOptions, ResolvedVc, SharedReference, TaskId, TraitMethod, ValueTypeId, Vc,
     VcValueTrait, VcValueType,
     backend::{
         Backend, CachedTaskType, CellContent, TaskCollectiblesMap, TaskExecutionSpec,
@@ -1727,8 +1727,6 @@ pub struct CurrentCellRef {
     is_serializable_cell_content: bool,
 }
 
-type VcReadRepr<T> = <<T as VcValueType>::Read as VcRead<T>>::Repr;
-
 impl CurrentCellRef {
     /// Updates the cell if the given `functor` returns a value.
     pub fn conditional_update<T>(&self, functor: impl FnOnce(Option<&T>) -> Option<T>)
@@ -1736,13 +1734,9 @@ impl CurrentCellRef {
         T: VcValueType,
     {
         self.conditional_update_with_shared_reference(|old_shared_reference| {
-            let old_ref = old_shared_reference
-                .and_then(|sr| sr.0.downcast_ref::<VcReadRepr<T>>())
-                .map(|content| <T::Read as VcRead<T>>::repr_to_value_ref(content));
+            let old_ref = old_shared_reference.and_then(|sr| sr.0.downcast_ref::<T>());
             let new_value = functor(old_ref)?;
-            Some(SharedReference::new(triomphe::Arc::new(
-                <T::Read as VcRead<T>>::value_to_repr(new_value),
-            )))
+            Some(SharedReference::new(triomphe::Arc::new(new_value)))
         })
     }
 
@@ -1823,23 +1817,20 @@ impl CurrentCellRef {
         });
     }
 
-    /// Replace the current cell's content with `new_shared_reference` if the
-    /// current content is not equal by value with the existing content.
+    /// Replace the current cell's content with `new_shared_reference` if the current content is not
+    /// equal by value with the existing content.
     ///
     /// If you already have a `SharedReference`, this is a faster version of
     /// [`CurrentCellRef::compare_and_update`].
     ///
-    /// The [`SharedReference`] is expected to use the `<T::Read as
-    /// VcRead<T>>::Repr` type for its representation of the value.
+    /// The value should be stored in [`SharedReference`] using the type `T`.
     pub fn compare_and_update_with_shared_reference<T>(&self, new_shared_reference: SharedReference)
     where
         T: VcValueType + PartialEq,
     {
         fn extract_sr_value<T: VcValueType>(sr: &SharedReference) -> &T {
-            <T::Read as VcRead<T>>::repr_to_value_ref(
-                sr.0.downcast_ref::<VcReadRepr<T>>()
-                    .expect("cannot update SharedReference of different type"),
-            )
+            sr.0.downcast_ref::<T>()
+                .expect("cannot update SharedReference of different type")
         }
         self.conditional_update_with_shared_reference(|old_sr| {
             if let Some(old_sr) = old_sr {
@@ -1863,9 +1854,7 @@ impl CurrentCellRef {
             self.current_task,
             self.index,
             self.is_serializable_cell_content,
-            CellContent(Some(SharedReference::new(triomphe::Arc::new(
-                <T::Read as VcRead<T>>::value_to_repr(new_value),
-            )))),
+            CellContent(Some(SharedReference::new(triomphe::Arc::new(new_value)))),
             verification_mode,
         )
     }
@@ -1876,8 +1865,7 @@ impl CurrentCellRef {
     /// If the passed-in [`SharedReference`] is the same as the existing cell's
     /// by identity, no update is performed.
     ///
-    /// The [`SharedReference`] is expected to use the `<T::Read as
-    /// VcRead<T>>::Repr` type for its representation of the value.
+    /// The value should be stored in [`SharedReference`] using the type `T`.
     pub fn update_with_shared_reference(
         &self,
         shared_ref: SharedReference,
